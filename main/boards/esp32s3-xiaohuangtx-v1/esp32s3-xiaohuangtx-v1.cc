@@ -27,7 +27,7 @@ private:
             .intr_type = GPIO_INTR_DISABLE,
         };
         ESP_ERROR_CHECK(gpio_config(&config));
-        gpio_set_level(gpio_num_, 0);
+        gpio_set_level(gpio_num_, 1);
     }
 
 public:
@@ -40,11 +40,11 @@ public:
         // 定义设备可以被远程执行的指令
         methods_.AddMethod("TurnOn", "打开灯", ParameterList(), [this](const ParameterList& parameters) {
             power_ = true;
-            gpio_set_level(gpio_num_, 1);
+            gpio_set_level(gpio_num_, 0);
         });
         methods_.AddMethod("TurnOff", "关闭灯", ParameterList(), [this](const ParameterList& parameters) {
             power_ = false;
-            gpio_set_level(gpio_num_, 0);
+            gpio_set_level(gpio_num_, 1);
         });
     }
 };
