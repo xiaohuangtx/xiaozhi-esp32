@@ -1,7 +1,6 @@
 #include "wifi_board.h"
 #include "audio_codecs/no_audio_codec.h"
 #include "display/ssd1306_display.h"
-#include "system_reset.h"
 #include "application.h"
 #include "button.h"
 #include "config.h"
@@ -18,10 +17,8 @@ class Esp32s3XiaohuangtxV1 : public WifiBoard {
 private:
     i2c_master_bus_handle_t display_i2c_bus_;
     Button boot_button_;
-    Button touch_button_;
     Button volume_up_button_;
     Button volume_down_button_;
-    SystemReset system_reset_;
 
     void InitializeDisplayI2c() {
         i2c_master_bus_config_t bus_config = {
@@ -47,10 +44,10 @@ private:
             }
             app.ToggleChatState();
         });
-        touch_button_.OnPressDown([this]() {
+        boot_button_.OnPressDown([this]() {
             Application::GetInstance().StartListening();
         });
-        touch_button_.OnPressUp([this]() {
+        boot_button_.OnPressUp([this]() {
             Application::GetInstance().StopListening();
         });
 
@@ -95,13 +92,9 @@ private:
 public:
     Esp32s3XiaohuangtxV1() :
         boot_button_(BOOT_BUTTON_GPIO),
-        touch_button_(TOUCH_BUTTON_GPIO),
         volume_up_button_(VOLUME_UP_BUTTON_GPIO),
-        volume_down_button_(VOLUME_DOWN_BUTTON_GPIO),
-        system_reset_(RESET_NVS_BUTTON_GPIO, RESET_FACTORY_BUTTON_GPIO) {
-        // Check if the reset button is pressed
-        system_reset_.CheckButtons();
-
+        volume_down_button_(VOLUME_DOWN_BUTTON_GPIO)
+    {
         InitializeDisplayI2c();
         InitializeButtons();
         InitializeIot();
