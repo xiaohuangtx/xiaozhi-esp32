@@ -1,16 +1,14 @@
 #include "wifi_board.h"
-#include "audio_codecs/es8311_audio_codec.h"
+#include "codecs/es8311_audio_codec.h"
 #include "display/lcd_display.h"
-#include "display/no_display.h"
 #include "application.h"
 #include "button.h"
 #include "config.h"
 #include "i2c_device.h"
-#include "iot/thing_manager.h"
+#include "assets/lang_config.h"
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
-#include <wifi_station.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_gc9a01.h>
@@ -51,9 +49,27 @@ public:
         WriteReg(0x08, data);
     }
 
-    void SetLcdBacklight(uint8_t brightness) {
+    void SetBrightness(uint8_t brightness) {
+        // Map 0~100 to 0~255
+        brightness = brightness * 255 / 100;
         WriteReg(0x0E, brightness);
     }
+};
+
+class CustomBacklight : public Backlight {
+public:
+    CustomBacklight(Lp5562* lp5562) : lp5562_(lp5562) {}
+
+    void SetBrightnessImpl(uint8_t brightness) override {
+        if (lp5562_) {
+            lp5562_->SetBrightness(brightness);
+        } else {
+            ESP_LOGE(TAG, "LP5562 not available");
+        }
+    }
+
+private:
+    Lp5562* lp5562_ = nullptr;
 };
 
 static const gc9a01_lcd_init_cmd_t gc9107_lcd_init_cmds[] = {
@@ -89,10 +105,12 @@ class AtomS3rEchoBaseBoard : public WifiBoard {
 private:
     i2c_master_bus_handle_t i2c_bus_;
     i2c_master_bus_handle_t i2c_bus_internal_;
-    Pi4ioe* pi4ioe_;
-    Lp5562* lp5562_;
-    Display* display_;
+    Pi4ioe* pi4ioe_ = nullptr;
+    Lp5562* lp5562_ = nullptr;
+    Display* display_ = nullptr;
     Button boot_button_;
+    bool is_echo_base_connected_ = false;
+
     void InitializeI2c() {
         // Initialize I2C peripheral
         i2c_master_bus_config_t i2c_bus_cfg = {
@@ -116,6 +134,8 @@ private:
     }
 
     void I2cDetect() {
+        is_echo_base_connected_ = false;
+        uint8_t echo_base_connected_flag = 0x00;
         uint8_t address;
         printf("     0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f\r\n");
         for (int i = 0; i < 128; i += 16) {
@@ -126,6 +146,11 @@ private:
                 esp_err_t ret = i2c_master_probe(i2c_bus_, address, pdMS_TO_TICKS(200));
                 if (ret == ESP_OK) {
                     printf("%02x ", address);
+                    if (address == 0x18) {
+                        echo_base_connected_flag |= 0xF0;
+                    } else if (address == 0x43) {
+                        echo_base_connected_flag |= 0x0F;
+                    }
                 } else if (ret == ESP_ERR_TIMEOUT) {
                     printf("UU ");
                 } else {
@@ -133,6 +158,40 @@ private:
                 }
             }
             printf("\r\n");
+        }
+        is_echo_base_connected_ = (echo_base_connected_flag == 0xFF);
+    }
+
+    void CheckEchoBaseConnection() {
+        if (is_echo_base_connected_) {
+            return;
+        }
+        
+        // Pop error page
+        InitializeLp5562();
+        InitializeSpi();
+        InitializeGc9107Display();
+        InitializeButtons();
+        GetBacklight()->SetBrightness(100);
+        display_->SetStatus(Lang::Strings::ERROR);
+        display_->SetEmotion("triangle_exclamation");
+        display_->SetChatMessage("system", "Echo Base\nnot connected");
+        
+        while (1) {
+            ESP_LOGE(TAG, "Atomic Echo Base is disconnected");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+
+            // Rerun detection
+            I2cDetect();
+            if (is_echo_base_connected_) {
+                vTaskDelay(pdMS_TO_TICKS(500));
+                I2cDetect();
+                if (is_echo_base_connected_) {
+                    ESP_LOGI(TAG, "Atomic Echo Base is reconnected");
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    esp_restart();
+                }
+            }
         }
     }
 
@@ -145,7 +204,6 @@ private:
     void InitializeLp5562() {
         ESP_LOGI(TAG, "Init LP5562");
         lp5562_ = new Lp5562(i2c_bus_internal_, 0x30);
-        lp5562_->SetLcdBacklight(255);
     }
 
     void InitializeSpi() {
@@ -183,7 +241,7 @@ private:
         };
         esp_lcd_panel_dev_config_t panel_config = {};
         panel_config.reset_gpio_num = GPIO_NUM_48; // Set to -1 if not use
-        panel_config.rgb_endian = LCD_RGB_ENDIAN_RGB;
+        panel_config.rgb_endian = LCD_RGB_ENDIAN_BGR;
         panel_config.bits_per_pixel = 16; // Implemented by LCD command `3Ah` (16/18)
         panel_config.vendor_config = &gc9107_vendor_config;
 
@@ -192,50 +250,58 @@ private:
         ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
         ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true)); 
 
-        display_ = new LcdDisplay(io_handle, panel_handle, DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT,
+        display_ = new SpiLcdDisplay(io_handle, panel_handle,
                                     DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
     }
 
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
-            if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
-                ResetWifiConfiguration();
+            if (app.GetDeviceState() == kDeviceStateStarting) {
+                EnterWifiConfigMode();
+                return;
             }
             app.ToggleChatState();
         });
-    }
-
-    // 物联网初始化，添加对 AI 可见设备
-    void InitializeIot() {
-        auto& thing_manager = iot::ThingManager::GetInstance();
-        thing_manager.AddThing(iot::CreateThing("Speaker"));
     }
 
 public:
     AtomS3rEchoBaseBoard() : boot_button_(BOOT_BUTTON_GPIO) {
         InitializeI2c();
         I2cDetect();
+        CheckEchoBaseConnection();
         InitializePi4ioe();
         InitializeLp5562();
         InitializeSpi();
         InitializeGc9107Display();
         InitializeButtons();
-        InitializeIot();
+        GetBacklight()->RestoreBrightness();
     }
 
     virtual AudioCodec* GetAudioCodec() override {
-        static Es8311AudioCodec* audio_codec = nullptr;
-        if (audio_codec == nullptr) {
-            audio_codec = new Es8311AudioCodec(i2c_bus_, I2C_NUM_1, AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
-                AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS, AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN,
-                AUDIO_CODEC_GPIO_PA, AUDIO_CODEC_ES8311_ADDR, false);
-        }
-        return audio_codec;
+        static Es8311AudioCodec audio_codec(
+            i2c_bus_, 
+            I2C_NUM_1, 
+            AUDIO_INPUT_SAMPLE_RATE, 
+            AUDIO_OUTPUT_SAMPLE_RATE,
+            AUDIO_I2S_GPIO_MCLK, 
+            AUDIO_I2S_GPIO_BCLK, 
+            AUDIO_I2S_GPIO_WS, 
+            AUDIO_I2S_GPIO_DOUT, 
+            AUDIO_I2S_GPIO_DIN,
+            AUDIO_CODEC_GPIO_PA, 
+            AUDIO_CODEC_ES8311_ADDR, 
+            false);
+        return &audio_codec;
     }
 
     virtual Display* GetDisplay() override {
         return display_;
+    }
+
+    virtual Backlight *GetBacklight() override {
+        static CustomBacklight backlight(lp5562_);
+        return &backlight;
     }
 };
 

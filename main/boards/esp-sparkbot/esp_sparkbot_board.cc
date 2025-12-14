@@ -1,17 +1,20 @@
 #include "wifi_board.h"
-#include "audio_codecs/es8311_audio_codec.h"
+#include "codecs/es8311_audio_codec.h"
 #include "display/lcd_display.h"
-#include "font_awesome_symbols.h"
 #include "application.h"
 #include "button.h"
 #include "config.h"
-#include "iot/thing_manager.h"
+#include "mcp_server.h"
+#include "settings.h"
 
-#include <wifi_station.h>
 #include <esp_log.h>
 #include <esp_lcd_panel_vendor.h>
 #include <driver/i2c_master.h>
 #include <driver/spi_common.h>
+#include <driver/uart.h>
+#include <cstring>
+
+#include "esp32_camera.h"
 
 #define TAG "esp_sparkbot"
 
@@ -42,6 +45,8 @@ private:
     i2c_master_bus_handle_t i2c_bus_;
     Button boot_button_;
     Display* display_;
+    Esp32Camera* camera_;
+    light_mode_t light_mode_ = LIGHT_MODE_ALWAYS_ON;
 
     void InitializeI2c() {
         // Initialize I2C peripheral
@@ -74,8 +79,9 @@ private:
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
-            if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
-                ResetWifiConfiguration();
+            if (app.GetDeviceState() == kDeviceStateStarting) {
+                EnterWifiConfigMode();
+                return;
             }
             app.ToggleChatState();
         });
@@ -108,16 +114,156 @@ private:
         
         esp_lcd_panel_reset(panel);
         esp_lcd_panel_init(panel);
-        esp_lcd_panel_invert_color(panel, false);
+        esp_lcd_panel_invert_color(panel, true);
         esp_lcd_panel_disp_on_off(panel, true);
-        display_ = new LcdDisplay(panel_io, panel, DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT,
+        display_ = new SpiLcdDisplay(panel_io, panel,
                                     DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
     }
 
-    // 物联网初始化，添加对 AI 可见设备
-    void InitializeIot() {
-        auto& thing_manager = iot::ThingManager::GetInstance();
-        thing_manager.AddThing(iot::CreateThing("Speaker"));
+    void InitializeCamera() {
+
+        // DVP pin configuration
+        static esp_cam_ctlr_dvp_pin_config_t dvp_pin_config = {
+            .data_width = CAM_CTLR_DATA_WIDTH_8,
+            .data_io = {
+                [0] = SPARKBOT_CAMERA_D0,
+                [1] = SPARKBOT_CAMERA_D1,
+                [2] = SPARKBOT_CAMERA_D2,
+                [3] = SPARKBOT_CAMERA_D3,
+                [4] = SPARKBOT_CAMERA_D4,
+                [5] = SPARKBOT_CAMERA_D5,
+                [6] = SPARKBOT_CAMERA_D6,
+                [7] = SPARKBOT_CAMERA_D7,
+            },
+            .vsync_io = SPARKBOT_CAMERA_VSYNC,
+            .de_io = SPARKBOT_CAMERA_HSYNC,
+            .pclk_io = SPARKBOT_CAMERA_PCLK,
+            .xclk_io = SPARKBOT_CAMERA_XCLK,
+        };
+
+        // 复用 I2C 总线
+        esp_video_init_sccb_config_t sccb_config = {
+            .init_sccb = false,  // 不初始化新的 SCCB，使用现有的 I2C 总线
+            .i2c_handle = i2c_bus_,  // 使用现有的 I2C 总线句柄
+            .freq = 100000,  // 100kHz
+        };
+
+        // DVP configuration
+        esp_video_init_dvp_config_t dvp_config = {
+            .sccb_config = sccb_config,
+            .reset_pin = SPARKBOT_CAMERA_RESET,
+            .pwdn_pin = SPARKBOT_CAMERA_PWDN,
+            .dvp_pin = dvp_pin_config,
+            .xclk_freq = SPARKBOT_CAMERA_XCLK_FREQ,
+        };
+
+        // Main video configuration
+        esp_video_init_config_t video_config = {
+            .dvp = &dvp_config,
+        };
+        
+        camera_ = new Esp32Camera(video_config);
+
+        Settings settings("sparkbot", false);
+        // 考虑到部分复刻使用了不可动摄像头的设计，默认启用翻转
+        bool camera_flipped = static_cast<bool>(settings.GetInt("camera-flipped", 1));
+        camera_->SetHMirror(camera_flipped);
+        camera_->SetVFlip(camera_flipped);
+    }
+
+    /*
+        ESP-SparkBot 的底座
+        https://gitee.com/esp-friends/esp_sparkbot/tree/master/example/tank/c2_tracked_chassis
+    */
+    void InitializeEchoUart() {
+        uart_config_t uart_config = {
+            .baud_rate = ECHO_UART_BAUD_RATE,
+            .data_bits = UART_DATA_8_BITS,
+            .parity    = UART_PARITY_DISABLE,
+            .stop_bits = UART_STOP_BITS_1,
+            .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+            .source_clk = UART_SCLK_DEFAULT,
+        };
+        int intr_alloc_flags = 0;
+
+        ESP_ERROR_CHECK(uart_driver_install(ECHO_UART_PORT_NUM, BUF_SIZE * 2, 0, 0, NULL, intr_alloc_flags));
+        ESP_ERROR_CHECK(uart_param_config(ECHO_UART_PORT_NUM, &uart_config));
+        ESP_ERROR_CHECK(uart_set_pin(ECHO_UART_PORT_NUM, UART_ECHO_TXD, UART_ECHO_RXD, UART_ECHO_RTS, UART_ECHO_CTS));
+
+        SendUartMessage("w2");
+    }
+
+    void SendUartMessage(const char * command_str) {
+        uint8_t len = strlen(command_str);
+        uart_write_bytes(ECHO_UART_PORT_NUM, command_str, len);
+        ESP_LOGI(TAG, "Sent command: %s", command_str);
+    }
+
+    void InitializeTools() {
+        auto& mcp_server = McpServer::GetInstance();
+        // 定义设备的属性
+        mcp_server.AddTool("self.chassis.get_light_mode", "获取灯光效果编号", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+            if (light_mode_ < 2) {
+                return 1;
+            } else {
+                return light_mode_ - 2;
+            }
+        });
+
+        mcp_server.AddTool("self.chassis.go_forward", "前进", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+            SendUartMessage("x0.0 y1.0");
+            return true;
+        });
+
+        mcp_server.AddTool("self.chassis.go_back", "后退", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+            SendUartMessage("x0.0 y-1.0");
+            return true;
+        });
+
+        mcp_server.AddTool("self.chassis.turn_left", "向左转", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+            SendUartMessage("x-1.0 y0.0");
+            return true;
+        });
+
+        mcp_server.AddTool("self.chassis.turn_right", "向右转", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+            SendUartMessage("x1.0 y0.0");
+            return true;
+        });
+        
+        mcp_server.AddTool("self.chassis.dance", "跳舞", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+            SendUartMessage("d1");
+            light_mode_ = LIGHT_MODE_MAX;
+            return true;
+        });
+
+        mcp_server.AddTool("self.chassis.switch_light_mode", "打开灯光效果", PropertyList({
+            Property("light_mode", kPropertyTypeInteger, 1, 6)
+        }), [this](const PropertyList& properties) -> ReturnValue {
+            char command_str[5] = {'w', 0, 0};
+            char mode = static_cast<light_mode_t>(properties["light_mode"].value<int>());
+
+            ESP_LOGI(TAG, "Switch Light Mode: %c", (mode + '0'));
+
+            if (mode >= 3 && mode <= 8) {
+                command_str[1] = mode + '0';
+                SendUartMessage(command_str);
+                return true;
+            }
+            throw std::runtime_error("Invalid light mode");
+        });
+
+        mcp_server.AddTool("self.camera.set_camera_flipped", "翻转摄像头图像方向", PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+            Settings settings("sparkbot", true);
+            // 考虑到部分复刻使用了不可动摄像头的设计，默认启用翻转
+            bool flipped = !static_cast<bool>(settings.GetInt("camera-flipped", 1));
+            
+            camera_->SetHMirror(flipped);
+            camera_->SetVFlip(flipped);
+            
+            settings.SetInt("camera-flipped", flipped ? 1 : 0);
+            
+            return true;
+        });
     }
 
 public:
@@ -126,7 +272,10 @@ public:
         InitializeSpi();
         InitializeDisplay();
         InitializeButtons();
-        InitializeIot();
+        InitializeCamera();
+        InitializeEchoUart();
+        InitializeTools();
+        GetBacklight()->RestoreBrightness();
     }
 
     virtual AudioCodec* GetAudioCodec() override {
@@ -138,6 +287,15 @@ public:
 
     virtual Display* GetDisplay() override {
         return display_;
+    }
+
+    virtual Backlight* GetBacklight() override {
+        static PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
+        return &backlight;
+    }
+
+    virtual Camera* GetCamera() override {
+        return camera_;
     }
 };
 

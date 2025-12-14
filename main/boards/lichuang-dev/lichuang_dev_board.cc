@@ -1,20 +1,23 @@
 #include "wifi_board.h"
-#include "audio_codecs/box_audio_codec.h"
+#include "codecs/box_audio_codec.h"
 #include "display/lcd_display.h"
+#include "display/emote_display.h"
 #include "application.h"
 #include "button.h"
 #include "config.h"
 #include "i2c_device.h"
-#include "iot/thing_manager.h"
+#include "esp32_camera.h"
+#include "mcp_server.h"
 
 #include <esp_log.h>
 #include <esp_lcd_panel_vendor.h>
 #include <driver/i2c_master.h>
 #include <driver/spi_common.h>
-#include <wifi_station.h>
+#include <esp_lcd_touch_ft5x06.h>
+#include <esp_lvgl_port.h>
+#include <lvgl.h>
 
 #define TAG "LichuangDevBoard"
-
 
 class Pca9557 : public I2cDevice {
 public:
@@ -30,14 +33,45 @@ public:
     }
 };
 
+class CustomAudioCodec : public BoxAudioCodec {
+private:
+    Pca9557* pca9557_;
+
+public:
+    CustomAudioCodec(i2c_master_bus_handle_t i2c_bus, Pca9557* pca9557) 
+        : BoxAudioCodec(i2c_bus, 
+                       AUDIO_INPUT_SAMPLE_RATE, 
+                       AUDIO_OUTPUT_SAMPLE_RATE,
+                       AUDIO_I2S_GPIO_MCLK, 
+                       AUDIO_I2S_GPIO_BCLK, 
+                       AUDIO_I2S_GPIO_WS, 
+                       AUDIO_I2S_GPIO_DOUT, 
+                       AUDIO_I2S_GPIO_DIN,
+                       GPIO_NUM_NC, 
+                       AUDIO_CODEC_ES8311_ADDR, 
+                       AUDIO_CODEC_ES7210_ADDR, 
+                       AUDIO_INPUT_REFERENCE),
+          pca9557_(pca9557) {
+    }
+
+    virtual void EnableOutput(bool enable) override {
+        BoxAudioCodec::EnableOutput(enable);
+        if (enable) {
+            pca9557_->SetOutputState(1, 1);
+        } else {
+            pca9557_->SetOutputState(1, 0);
+        }
+    }
+};
 
 class LichuangDevBoard : public WifiBoard {
 private:
     i2c_master_bus_handle_t i2c_bus_;
     i2c_master_dev_handle_t pca9557_handle_;
     Button boot_button_;
-    LcdDisplay* display_;
+    Display* display_;
     Pca9557* pca9557_;
+    Esp32Camera* camera_;
 
     void InitializeI2c() {
         // Initialize I2C peripheral
@@ -73,17 +107,22 @@ private:
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
-            if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
-                ResetWifiConfiguration();
+            // During startup (before connected), pressing BOOT button enters Wi-Fi config mode without reboot
+            if (app.GetDeviceState() == kDeviceStateStarting) {
+                EnterWifiConfigMode();
+                return;
             }
             app.ToggleChatState();
         });
-        boot_button_.OnPressDown([this]() {
-            Application::GetInstance().StartListening();
+
+#if CONFIG_USE_DEVICE_AEC
+        boot_button_.OnDoubleClick([this]() {
+            auto& app = Application::GetInstance();
+            if (app.GetDeviceState() == kDeviceStateIdle) {
+                app.SetAecMode(app.GetAecMode() == kAecOff ? kAecOnDeviceSide : kAecOff);
+            }
         });
-        boot_button_.OnPressUp([this]() {
-            Application::GetInstance().StopListening();
-        });
+#endif
     }
 
     void InitializeSt7789Display() {
@@ -116,14 +155,107 @@ private:
         esp_lcd_panel_invert_color(panel, true);
         esp_lcd_panel_swap_xy(panel, DISPLAY_SWAP_XY);
         esp_lcd_panel_mirror(panel, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
-        display_ = new LcdDisplay(panel_io, panel, DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT,
-                                    DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+        esp_lcd_panel_disp_on_off(panel, true);
+
+#if CONFIG_USE_EMOTE_MESSAGE_STYLE
+        display_ = new emote::EmoteDisplay(panel, panel_io, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+#else
+        display_ = new SpiLcdDisplay(panel_io, panel,
+            DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+#endif
     }
 
-    // 物联网初始化，添加对 AI 可见设备
-    void InitializeIot() {
-        auto& thing_manager = iot::ThingManager::GetInstance();
-        thing_manager.AddThing(iot::CreateThing("Speaker"));
+    void InitializeTouch()
+    {
+        esp_lcd_touch_handle_t tp;
+        esp_lcd_touch_config_t tp_cfg = {
+            .x_max = DISPLAY_HEIGHT,
+            .y_max = DISPLAY_WIDTH,
+            .rst_gpio_num = GPIO_NUM_NC, // Shared with LCD reset
+            .int_gpio_num = GPIO_NUM_NC, 
+            .levels = {
+                .reset = 0,
+                .interrupt = 0,
+            },
+            .flags = {
+                .swap_xy = 1,
+                .mirror_x = 1,
+                .mirror_y = 0,
+            },
+        };
+        esp_lcd_panel_io_handle_t tp_io_handle = NULL;
+        esp_lcd_panel_io_i2c_config_t tp_io_config = ESP_LCD_TOUCH_IO_I2C_FT5x06_CONFIG();
+        tp_io_config.scl_speed_hz = 400000;
+
+        esp_lcd_new_panel_io_i2c(i2c_bus_, &tp_io_config, &tp_io_handle);
+        esp_lcd_touch_new_i2c_ft5x06(tp_io_handle, &tp_cfg, &tp);
+        assert(tp);
+
+        /* Add touch input (for selected screen) */
+        const lvgl_port_touch_cfg_t touch_cfg = {
+            .disp = lv_display_get_default(), 
+            .handle = tp,
+        };
+
+        if(touch_cfg.disp) {
+            lvgl_port_add_touch(&touch_cfg);
+        } else {
+            ESP_LOGE(TAG, "Touch display is not initialized");
+        }
+    }
+
+    void InitializeCamera() {
+        // Open camera power
+        pca9557_->SetOutputState(2, 0);
+
+        static esp_cam_ctlr_dvp_pin_config_t dvp_pin_config = {
+            .data_width = CAM_CTLR_DATA_WIDTH_8,
+            .data_io = {
+                [0] = CAMERA_PIN_D0,
+                [1] = CAMERA_PIN_D1,
+                [2] = CAMERA_PIN_D2,
+                [3] = CAMERA_PIN_D3,
+                [4] = CAMERA_PIN_D4,
+                [5] = CAMERA_PIN_D5,
+                [6] = CAMERA_PIN_D6,
+                [7] = CAMERA_PIN_D7,
+            },
+            .vsync_io = CAMERA_PIN_VSYNC,
+            .de_io = CAMERA_PIN_HREF,
+            .pclk_io = CAMERA_PIN_PCLK,
+            .xclk_io = CAMERA_PIN_XCLK,
+        };
+
+        esp_video_init_sccb_config_t sccb_config = {
+            .init_sccb = false,
+            .i2c_handle = i2c_bus_,
+            .freq = 100000,
+        };
+
+        esp_video_init_dvp_config_t dvp_config = {
+            .sccb_config = sccb_config,
+            .reset_pin = CAMERA_PIN_RESET,
+            .pwdn_pin = CAMERA_PIN_PWDN,
+            .dvp_pin = dvp_pin_config,
+            .xclk_freq = XCLK_FREQ_HZ,
+        };
+
+        esp_video_init_config_t video_config = {
+            .dvp = &dvp_config,
+        };
+
+        camera_ = new Esp32Camera(video_config);
+    }
+
+    void InitializeTools() {
+        auto &mcp_server = McpServer::GetInstance();
+        mcp_server.AddTool("self.system.reconfigure_wifi",
+            "End this conversation and enter WiFi configuration mode.\n"
+            "**CAUTION** You must ask the user to confirm this action.",
+            PropertyList(), [this](const PropertyList& properties) {
+                EnterWifiConfigMode();
+                return true;
+            });
     }
 
 public:
@@ -131,22 +263,32 @@ public:
         InitializeI2c();
         InitializeSpi();
         InitializeSt7789Display();
+        InitializeTouch();
         InitializeButtons();
-        InitializeIot();
+        InitializeCamera();
+        InitializeTools();
+
+        GetBacklight()->RestoreBrightness();
     }
 
     virtual AudioCodec* GetAudioCodec() override {
-        static BoxAudioCodec* audio_codec = nullptr;
-        if (audio_codec == nullptr) {
-            audio_codec = new BoxAudioCodec(i2c_bus_, AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
-                AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS, AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN,
-                GPIO_NUM_NC, AUDIO_CODEC_ES8311_ADDR, AUDIO_CODEC_ES7210_ADDR, AUDIO_INPUT_REFERENCE);
-        }
-        return audio_codec;
+        static CustomAudioCodec audio_codec(
+            i2c_bus_, 
+            pca9557_);
+        return &audio_codec;
     }
 
     virtual Display* GetDisplay() override {
         return display_;
+    }
+    
+    virtual Backlight* GetBacklight() override {
+        static PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
+        return &backlight;
+    }
+
+    virtual Camera* GetCamera() override {
+        return camera_;
     }
 };
 
