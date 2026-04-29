@@ -130,7 +130,7 @@ choice BOARD_TYPE
         depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_BREAD_COMPACT_WIFI_CAM
         bool "Bread Compact WiFi + LCD + Camera (面包板)"
-        depends on IDF_TARGET_ESP32S3     
+        depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_BREAD_COMPACT_ML307
         bool "Bread Compact ML307/EC801E (面包板 4G)"
         depends on IDF_TARGET_ESP32S3
@@ -254,6 +254,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_M5STACK_ATOM_S3R_ECHO_BASE
         bool "M5Stack AtomS3R + Echo Base"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_M5STACK_ATOM_S3R_ECHO_PYRAMID
+        bool "M5Stack AtomS3R + Echo Pyramid"
+        depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_M5STACK_ATOM_S3R_CAM_M12_ECHO_BASE
         bool "M5Stack AtomS3R CAM/M12 + Echo Base"
         depends on IDF_TARGET_ESP32S3
@@ -278,6 +281,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_1_8
         bool "Waveshare ESP32-S3-Touch-AMOLED-1.8"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_1_43C
+        bool "Waveshare ESP32-S3-Touch-AMOLED-1.43C"
+        depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_2_06
         bool "Waveshare ESP32-S3-Touch-AMOLED-2.06"
         depends on IDF_TARGET_ESP32S3
@@ -287,6 +293,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_WAVESHARE_ESP32_C6_TOUCH_AMOLED_2_16
         bool "Waveshare ESP32-C6-Touch-AMOLED-2.16"
         depends on IDF_TARGET_ESP32C6
+    config BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_2_16
+        bool "Waveshare ESP32-S3-Touch-AMOLED-2.16"
+        depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_1_75
         bool "Waveshare ESP32-S3-Touch-AMOLED-1.75"
         depends on IDF_TARGET_ESP32S3
@@ -437,6 +446,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_ATK_DNESP32S3M_4G
         bool "正点原子DNESP32S3M-4G"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_ATK_DNESP32S3_BOX3
+        bool "正点原子DNESP32S3-BOX3"
+        depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_DU_CHATX
         bool "嘟嘟开发板CHATX(wifi)"
         depends on IDF_TARGET_ESP32S3
@@ -541,6 +553,9 @@ choice BOARD_TYPE
         depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_Freenove_ESP32S3_DISPLAY_2_8_LCD
         bool "Freenove ESP32S3 Display 2.8 LCD"
+        depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_AI_VOX3
+        bool "NULLLAB-AI-VOX3"
         depends on IDF_TARGET_ESP32S3
 endchoice
 
@@ -674,7 +689,7 @@ endchoice
 choice DISPLAY_ESP32S3_TOUCH_LCD_1_85C
     depends on BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85C
     prompt "ESP32S3_TOUCH_LCD_1_85C version"
-    default VERSION_2_0 
+    default VERSION_2_0
     help
         hardware version
     config VERSION_1_0
@@ -802,7 +817,7 @@ config USE_DEVICE_AEC
         || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_3_4C || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_4C || BOARD_TYPE_ESP_S3_LCD_EV_Board_2 || BOARD_TYPE_YUNLIAO_S3 \
         || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_7 || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_8 || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_10_1 \
         || BOARD_TYPE_ESP_VOCAT || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_3_49 || BOARD_TYPE_WAVESHARE_ESP32_S3_RLCD_4_2 || BOARD_TYPE_ZHENGCHEN_CAM || BOARD_TYPE_ZHENGCHEN_CAM_ML307 \
-        || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_4_3C || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_1_54 || BOARD_TYPE_WAVESHARE_ESP32_S3_LCD_0_85)
+        || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_4_3C || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_1_54 || BOARD_TYPE_WAVESHARE_ESP32_S3_LCD_0_85 || BOARD_TYPE_AI_VOX3 || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_1_43C)
     help
         To work properly, device-side AEC requires a clean output reference path from the speaker signal and physical acoustic isolation between the microphone and speaker.
 
